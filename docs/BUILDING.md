@@ -2,7 +2,7 @@
 
 [中文版](BUILDING_CN.md)
 
-This guide describes how to prepare the development environment, build each component from source, run tests, and build RPM packages.
+This guide describes how to prepare the development environment, build each component from source, and run tests.
 
 Two paths are provided:
 
@@ -20,7 +20,6 @@ anolisa/
 │   └── agentsight/          # eBPF observability/audit agent (Rust, optional)
 ├── scripts/
 │   ├── build-all.sh         # Unified build entry (you will provide this script)
-│   └── rpm-build.sh         # Unified RPM build script
 ├── tests/
 │   └── run-all-tests.sh     # Unified test entry
 ├── Makefile
@@ -35,7 +34,6 @@ anolisa/
 | os-skills | Python >= 3.12 (only for optional scripts) |
 | agent-sec-core | Rust >= 1.91.0, Python >= 3.12, uv (Linux only) |
 | agentsight *(optional)* | Rust >= 1.80, clang >= 14, libbpf headers, kernel headers (Linux only) |
-| RPM packaging | rpmbuild (Linux only) |
 
 ## 3. Quick Start
 
@@ -46,23 +44,26 @@ git clone https://github.com/alibaba/anolisa.git
 cd anolisa
 ```
 
-Then **pick one** of the following commands based on your needs:
+Then run the build script. By default it installs dependencies, builds, and installs to the system:
 
 ```bash
-# Option 1: Install deps + build + install to system (recommended for most users)
-./scripts/build-all.sh --install-deps --install
+# Default: install deps + build + install to system (recommended for most users)
+./scripts/build-all.sh
 
-# Option 2: Install deps + build only (without system install)
-./scripts/build-all.sh --install-deps
+# Build only, skip system install
+./scripts/build-all.sh --no-install
 
-# Option 3: Install deps only (useful for CI or manual builds)
+# Skip dependency installation (deps already present)
+./scripts/build-all.sh --ignore-deps
+
+# Install dependencies only (useful for CI or manual builds)
 ./scripts/build-all.sh --deps-only
 
-# Option 4: Build selected components only
-./scripts/build-all.sh --install-deps --component cosh --component sec-core
+# Build and install selected components only
+./scripts/build-all.sh --component cosh --component sec-core
 
-# Option 5: Include optional agentsight
-./scripts/build-all.sh --install-deps --install --component cosh --component skills --component sec-core --component sight
+# Include optional agentsight
+./scripts/build-all.sh --component cosh --component skills --component sec-core --component sight
 ```
 
 > **Tip:** Each option above is a standalone command — just pick the one that fits your use case. If you use the unified script, you can skip the [Component-by-Component Build](#4-component-by-component-build) section below entirely.
@@ -71,9 +72,9 @@ Then **pick one** of the following commands based on your needs:
 
 | Flag | Description |
 |------|-------------|
-| --install-deps | Install dependencies before build |
-| --deps-only | Install dependencies only |
-| --install | Install built components to system paths after building |
+| --no-install | Skip installing built components to system paths |
+| --ignore-deps | Skip dependency installation |
+| --deps-only | Install dependencies only, do not build |
 | --component <name> | Build selected component(s), repeatable: cosh, skills, sec-core, sight. Default: cosh, skills, sec-core |
 | --help | Show help |
 

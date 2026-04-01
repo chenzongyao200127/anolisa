@@ -3,10 +3,11 @@
 # build-all.sh  –  ANOLISA unified build script
 #
 # Usage:
-#   ./scripts/build-all.sh --install-deps                     # install deps + build all
+#   ./scripts/build-all.sh                                    # install deps + build + install (default)
+#   ./scripts/build-all.sh --no-install                       # install deps + build, skip system install
+#   ./scripts/build-all.sh --ignore-deps                      # build + install, skip dep install
 #   ./scripts/build-all.sh --deps-only                        # install deps only
-#   ./scripts/build-all.sh --install-deps --component cosh    # deps + build copilot-shell
-#   ./scripts/build-all.sh --component sec-core --component sight   # build without dep install
+#   ./scripts/build-all.sh --component cosh                   # deps + build + install copilot-shell only
 #   ./scripts/build-all.sh --help
 #
 # Components (build order):
@@ -35,9 +36,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ─── defaults ───
 
-INSTALL_DEPS=false
+INSTALL_DEPS=true
 DEPS_ONLY=false
-DO_INSTALL=false
+DO_INSTALL=true
 COMPONENTS=()        # empty = all
 
 # ─── artifact tracking ───
@@ -662,9 +663,9 @@ $(echo -e "${BOLD}Usage:${NC}")
   $0 [OPTIONS]
 
 $(echo -e "${BOLD}Options:${NC}")
-  --install-deps          Install required toolchains and libraries before building
+  --no-install            Skip installing built components to system paths
+  --ignore-deps           Skip dependency installation
   --deps-only             Install dependencies only, do not build
-  --install               Install built components to system paths after building
   --component <name>      Build specific component (can be repeated).
                           Valid names: cosh, skills, sec-core, sight
                           Default (no --component): cosh, skills, sec-core
@@ -672,13 +673,13 @@ $(echo -e "${BOLD}Options:${NC}")
   -h, --help              Show this help
 
 $(echo -e "${BOLD}Examples:${NC}")
-  $0 --install-deps                              # Install deps + build default components
-  $0 --install-deps --install                     # Install deps + build + install to system
+  $0                                             # Install deps + build + install to system
+  $0 --no-install                                # Install deps + build (skip system install)
+  $0 --ignore-deps                               # Build + install (skip dep install)
   $0 --deps-only                                 # Install deps only
-  $0 --install-deps --component cosh             # Install deps + build copilot-shell
-  $0 --component sec-core --component sight            # Build sec-core + sight (no dep install)
-  $0 --install-deps --component cosh --component skills --component sec-core --component sight
-                                                 # Build all including optional sight
+  $0 --component cosh                            # Install deps + build + install copilot-shell
+  $0 --ignore-deps --component sec-core --component sight
+                                                 # Build + install sec-core and sight (no dep install)
 
 $(echo -e "${BOLD}Components:${NC}")
   cosh     copilot-shell      Node.js / TypeScript AI terminal assistant       [default]
@@ -692,7 +693,7 @@ $(echo -e "${BOLD}What this script does:${NC}")
   3. Falls back to upstream installers (nvm, rustup, uv) when system packages don't suffice
   4. Builds default components in order: cosh -> skills -> sec-core
      (sight is optional — add --component sight to include it)
-  5. Installs components to system paths (if --install is specified)
+  5. Installs components to system paths (use --no-install to skip)
   6. Reports artifact locations at the end
 
 $(echo -e "${BOLD}Note:${NC}")
@@ -707,17 +708,17 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --install-deps)
-                INSTALL_DEPS=true
+            --no-install)
+                DO_INSTALL=false
+                shift
+                ;;
+            --ignore-deps)
+                INSTALL_DEPS=false
                 shift
                 ;;
             --deps-only)
                 DEPS_ONLY=true
                 INSTALL_DEPS=true
-                shift
-                ;;
-            --install)
-                DO_INSTALL=true
                 shift
                 ;;
             --component)
@@ -737,9 +738,9 @@ parse_args() {
         esac
     done
 
-    # No flags at all -> show help
-    if ! $INSTALL_DEPS && [[ ${#COMPONENTS[@]} -eq 0 ]]; then
-        usage
+    # --deps-only implies INSTALL_DEPS regardless of --ignore-deps
+    if $DEPS_ONLY; then
+        INSTALL_DEPS=true
     fi
 }
 
@@ -764,10 +765,8 @@ main() {
     fi
 
     # 3. Build
-    if $INSTALL_DEPS || [[ ${#COMPONENTS[@]} -gt 0 ]]; then
-        do_build
-        print_artifacts
-    fi
+    do_build
+    print_artifacts
 
     # 4. Install to system paths if requested
     if $DO_INSTALL; then

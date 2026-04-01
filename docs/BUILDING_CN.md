@@ -2,7 +2,7 @@
 
 [English](BUILDING.md)
 
-本指南介绍如何准备开发环境、从源码构建各组件、运行测试以及构建 RPM 包。
+本指南介绍如何准备开发环境、从源码构建各组件并运行测试。
 
 提供两种构建路径：
 
@@ -20,7 +20,6 @@ anolisa/
 │   └── agentsight/          # eBPF 可观测/审计引擎（Rust，可选）
 ├── scripts/
 │   ├── build-all.sh         # 统一构建入口
-│   └── rpm-build.sh         # 统一 RPM 构建脚本
 ├── tests/
 │   └── run-all-tests.sh     # 统一测试入口
 ├── Makefile
@@ -35,7 +34,6 @@ anolisa/
 | os-skills | Python >= 3.12（仅可选脚本需要） |
 | agent-sec-core | Rust >= 1.91.0、Python >= 3.12、uv（仅 Linux） |
 | agentsight *（可选）* | Rust >= 1.80、clang >= 14、libbpf 头文件、内核头文件（仅 Linux） |
-| RPM 打包 | rpmbuild（仅 Linux） |
 
 ## 3. 快速开始
 
@@ -46,23 +44,26 @@ git clone https://github.com/alibaba/anolisa.git
 cd anolisa
 ```
 
-克隆完成后，根据需求**选择一个**命令执行即可：
+克隆完成后，运行构建脚本。默认会安装依赖、构建并安装到系统：
 
 ```bash
-# 方式一：安装依赖 + 构建 + 安装到系统（推荐大多数用户使用）
-./scripts/build-all.sh --install-deps --install
+# 默认：安装依赖 + 构建 + 安装到系统（推荐大多数用户使用）
+./scripts/build-all.sh
 
-# 方式二：安装依赖 + 仅构建（不安装到系统）
-./scripts/build-all.sh --install-deps
+# 仅构建，不安装到系统
+./scripts/build-all.sh --no-install
 
-# 方式三：仅安装依赖（适用于 CI 或手动构建场景）
+# 跳过依赖安装（依赖已就绪时使用）
+./scripts/build-all.sh --ignore-deps
+
+# 仅安装依赖（适用于 CI 或手动构建场景）
 ./scripts/build-all.sh --deps-only
 
-# 方式四：仅构建指定组件
-./scripts/build-all.sh --install-deps --component cosh --component sec-core
+# 仅构建并安装指定组件
+./scripts/build-all.sh --component cosh --component sec-core
 
-# 方式五：包含可选的 agentsight
-./scripts/build-all.sh --install-deps --install --component cosh --component skills --component sec-core --component sight
+# 包含可选的 agentsight
+./scripts/build-all.sh --component cosh --component skills --component sec-core --component sight
 ```
 
 > **提示：** 以上每个方式都是独立的命令，根据自己的需求选择一个执行即可。如果使用了统一构建脚本，可以跳过下方的[分组件构建](#4-分组件构建)部分。
@@ -71,9 +72,9 @@ cd anolisa
 
 | 参数 | 说明 |
 |------|------|
-| --install-deps | 构建前先安装依赖 |
+| --no-install | 跳过将组件安装到系统路径 |
+| --ignore-deps | 跳过依赖安装 |
 | --deps-only | 仅安装依赖，不构建 |
-| --install | 构建完成后将组件安装到系统路径 |
 | --component <名称> | 构建指定组件（可重复使用）：cosh、skills、sec-core、sight。默认：cosh、skills、sec-core |
 | --help | 显示帮助信息 |
 
