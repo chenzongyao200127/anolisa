@@ -280,9 +280,8 @@ clang --version    # clang version 14+
 
 ```bash
 cd src/copilot-shell
-make install
+make deps
 make build
-npm run bundle
 ```
 
 Artifact:
@@ -295,10 +294,9 @@ Artifact:
 # Run directly from the build directory
 node dist/cli.js
 
-# Or add a persistent 'co' alias to your shell
-make create-alias
-source "$HOME/.$(basename "$SHELL")rc"
-co
+# Or install to system PATH (creates cosh/co/copilot commands)
+sudo make install PREFIX=/usr/local
+cosh
 ```
 
 #### b) os-skills

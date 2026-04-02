@@ -280,9 +280,8 @@ clang --version    # clang version 14+
 
 ```bash
 cd src/copilot-shell
-make install
+make deps
 make build
-npm run bundle
 ```
 
 产物：
@@ -295,10 +294,9 @@ npm run bundle
 # 从构建目录直接运行
 node dist/cli.js
 
-# 或添加持久的 co 别名到你的 shell
-make create-alias
-source "$HOME/.$(basename "$SHELL")rc"
-co
+# 或安装到系统 PATH（创建 cosh/co/copilot 命令）
+sudo make install PREFIX=/usr/local
+cosh
 ```
 
 #### b) os-skills

@@ -688,19 +688,15 @@ do_build() {
 # ─── install functions ───
 
 install_cosh() {
-    step "Installing copilot-shell (create aliases)"
+    step "Installing copilot-shell"
     local dir="$PROJECT_ROOT/src/copilot-shell"
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
 
-    make create-alias
-
-    # Source shell rc to activate aliases in current session
-    local _rc
-    if [[ "${SHELL}" == */zsh ]]; then _rc="$HOME/.zshrc"; else _rc="$HOME/.bashrc"; fi
-    # shellcheck source=/dev/null
-    source "$_rc" 2>/dev/null || true
-    ok "copilot-shell aliases configured"
+    # System-level install: PREFIX/bin/{cosh,co,copilot}
+    info "sudo make install PREFIX=/usr/local ..."
+    sudo make install PREFIX=/usr/local
+    ok "copilot-shell installed to /usr/local/bin/{cosh,co,copilot}"
 }
 
 install_sec_core() {
@@ -872,15 +868,6 @@ main() {
 
     echo ""
     ok "Done"
-
-    # Remind user to source shell config for aliases
-    if $DO_INSTALL && want_component cosh; then
-        local _rc
-        if [[ "${SHELL}" == */zsh ]]; then _rc="~/.zshrc"; else _rc="~/.bashrc"; fi
-        echo ""
-        info "To activate 'co' / 'cosh' / 'copilot' aliases in your current terminal, run:"
-        echo -e "  ${BOLD}source ${_rc}${NC}"
-    fi
 }
 
 main "$@"
