@@ -231,16 +231,13 @@ jobs:
 
       - name: Run Python tests
         run: |
-          pip install pytest
           cd src/agent-sec-core
-          pytest tests/integration-test/ tests/unit-test/ -v
+          make test-python
 
       - name: Run Rust tests
         run: |
-          cd src/agent-sec-core/linux-sandbox
-          # Skip bwrap_seccomp tests: GitHub Actions runners lack user namespace
-          # and privilege support required by bubblewrap sandbox
-          cargo test -- --skip bwrap_seccomp
+          cd src/agent-sec-core
+          make test-rust
 
   # =========================================================================
   # Step 5: Test agentsight (Linux only)
