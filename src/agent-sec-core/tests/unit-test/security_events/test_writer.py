@@ -219,9 +219,11 @@ class TestWriterAutoRotation(unittest.TestCase):
             if f.startswith(f"{base_name}.") and not f.endswith(".lock") and os.path.isfile(os.path.join(dir_path, f))
         ]
 
-        # Check that backup files have timestamp pattern (YYYYMMDD-HHMMSS.fff)
+        # Check that backup files have timestamp pattern:
+        #   YYYYMMDD-HHMMSS.fff            (millisecond precision)
+        #   YYYYMMDD-HHMMSS.fff.<counter>   (collision-guard suffix)
         import re
-        timestamp_pattern = re.compile(r"^\d{8}-\d{6}\.\d{3}$")
+        timestamp_pattern = re.compile(r"^\d{8}-\d{6}\.\d{3}(\.\d+)?$")
 
         for backup_file in backup_files:
             # Extract the timestamp suffix
@@ -229,7 +231,7 @@ class TestWriterAutoRotation(unittest.TestCase):
             self.assertTrue(
                 timestamp_pattern.match(suffix),
                 f"Backup file '{backup_file}' should have timestamp format "
-                f"YYYYMMDD-HHMMSS.fff, got suffix: {suffix}"
+                f"YYYYMMDD-HHMMSS.fff[.N], got suffix: {suffix}"
             )
 
     def test_oldest_backups_are_deleted(self):
@@ -422,17 +424,126 @@ class TestWriterAutoRotation(unittest.TestCase):
             )
 
 
+class TestCleanupBackupMatching(unittest.TestCase):
+    """Verify _cleanup_old_backups correctly identifies backup files.
+
+    Tests cover:
+    - Normal timestamp-suffixed backups
+    - Collision-guard counter-suffixed backups (e.g. .123.1)
+    - Non-backup files that share the same prefix are NOT deleted
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.log_path = os.path.join(self.tmpdir, "security-events.jsonl")
+        # Create the active log file
+        with open(self.log_path, "w") as fh:
+            fh.write('{"event_type": "current"}\n')
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _create_file(self, name, age_offset=0):
+        """Create a file in tmpdir and set its mtime to (now - age_offset) seconds."""
+        import time
+        path = os.path.join(self.tmpdir, name)
+        with open(path, "w") as fh:
+            fh.write("data\n")
+        mtime = time.time() - age_offset
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def _list_files(self):
+        """Return set of filenames in tmpdir (excluding the active log)."""
+        base = os.path.basename(self.log_path)
+        return {f for f in os.listdir(self.tmpdir) if f != base}
+
+    def test_collision_guard_backups_are_recognized(self):
+        """Backups with .N collision-guard suffix must be counted and cleaned."""
+        # Create 4 backups: 2 normal, 2 collision-guarded; backup_count=2
+        self._create_file("security-events.jsonl.20260101-120000.100", age_offset=40)
+        self._create_file("security-events.jsonl.20260101-120000.100.1", age_offset=30)
+        self._create_file("security-events.jsonl.20260101-120001.200", age_offset=20)
+        self._create_file("security-events.jsonl.20260101-120001.200.1", age_offset=10)
+
+        writer = SecurityEventWriter(path=self.log_path, backup_count=2)
+        writer._cleanup_old_backups()
+
+        remaining = self._list_files()
+        # Only the 2 most recent (by mtime) should survive
+        self.assertLessEqual(len(remaining), 2, f"Expected <= 2 backups, got: {remaining}")
+        # The two oldest (age_offset=40, 30) should be gone
+        self.assertNotIn("security-events.jsonl.20260101-120000.100", remaining)
+        self.assertNotIn("security-events.jsonl.20260101-120000.100.1", remaining)
+
+    def test_non_backup_files_are_not_deleted(self):
+        """Files that share the prefix but don't match the timestamp pattern must survive."""
+        # Create files that should NOT be treated as backups
+        self._create_file("security-events.jsonl.old", age_offset=100)
+        self._create_file("security-events.jsonl.bak", age_offset=100)
+        self._create_file("security-events.jsonl.lock", age_offset=100)
+        self._create_file("security-events.jsonl.tmp", age_offset=100)
+        self._create_file("security-events.jsonl.schema", age_offset=100)
+        # And one real backup
+        self._create_file("security-events.jsonl.20260101-120000.100", age_offset=5)
+
+        writer = SecurityEventWriter(path=self.log_path, backup_count=5)
+        writer._cleanup_old_backups()
+
+        remaining = self._list_files()
+        # All non-backup files must survive
+        for name in ["security-events.jsonl.old", "security-events.jsonl.bak",
+                     "security-events.jsonl.lock", "security-events.jsonl.tmp",
+                     "security-events.jsonl.schema"]:
+            self.assertIn(name, remaining, f"{name} should NOT have been deleted")
+        # The real backup should also survive (only 1 backup, limit is 5)
+        self.assertIn("security-events.jsonl.20260101-120000.100", remaining)
+
+    def test_mixed_cleanup_respects_backup_count(self):
+        """With a mix of real backups and non-backup files, only real backups are counted."""
+        # 5 real backups (mix of normal and collision-guarded)
+        self._create_file("security-events.jsonl.20260101-100000.000", age_offset=50)
+        self._create_file("security-events.jsonl.20260101-100000.000.1", age_offset=40)
+        self._create_file("security-events.jsonl.20260101-110000.000", age_offset=30)
+        self._create_file("security-events.jsonl.20260101-120000.000", age_offset=20)
+        self._create_file("security-events.jsonl.20260101-130000.000", age_offset=10)
+        # Non-backup files
+        self._create_file("security-events.jsonl.old", age_offset=200)
+        self._create_file("security-events.jsonl.notes", age_offset=200)
+
+        writer = SecurityEventWriter(path=self.log_path, backup_count=3)
+        writer._cleanup_old_backups()
+
+        remaining = self._list_files()
+        # Non-backup files must survive
+        self.assertIn("security-events.jsonl.old", remaining)
+        self.assertIn("security-events.jsonl.notes", remaining)
+        # 2 oldest real backups should be gone
+        self.assertNotIn("security-events.jsonl.20260101-100000.000", remaining)
+        self.assertNotIn("security-events.jsonl.20260101-100000.000.1", remaining)
+        # 3 most recent should remain
+        self.assertIn("security-events.jsonl.20260101-110000.000", remaining)
+        self.assertIn("security-events.jsonl.20260101-120000.000", remaining)
+        self.assertIn("security-events.jsonl.20260101-130000.000", remaining)
+
+
 # ------------------------------------------------------------------
 # Helper for cross-process tests (must be module-level & picklable)
 # ------------------------------------------------------------------
 
 def _child_writer(path, proc_id, event_count, max_bytes, backup_count):
-    """Entry point executed inside each child process."""
+    """Entry point executed inside each child process.
+    
+    Returns a list of event_type strings that this process successfully
+    passed to write() — used for post-mortem analysis when events are lost.
+    """
     kwargs = {"path": path}
     if max_bytes:
         kwargs["max_bytes"] = max_bytes
         kwargs["backup_count"] = backup_count
     writer = SecurityEventWriter(**kwargs)
+    written_events = []
     for i in range(event_count):
         evt = SecurityEvent(
             event_type=f"p{proc_id}_e{i}",
@@ -440,6 +551,8 @@ def _child_writer(path, proc_id, event_count, max_bytes, backup_count):
             details={"proc": proc_id, "seq": i, "pad": "x" * 30},
         )
         writer.write(evt)
+        written_events.append(f"p{proc_id}_e{i}")
+    return written_events
 
 
 class TestWriterMultiProcessSafety(unittest.TestCase):
@@ -493,7 +606,7 @@ class TestWriterMultiProcessSafety(unittest.TestCase):
         base_name = os.path.basename(self.tmp.name)
         all_files = [self.tmp.name]
         for name in os.listdir(dir_path):
-            if name.startswith(f"{base_name}.") and not name.endswith(".lock"):
+            if name.startswith(f"{base_name}.") and not name.endswith((".lock", ".tmp")):
                 all_files.append(os.path.join(dir_path, name))
 
         events = []
