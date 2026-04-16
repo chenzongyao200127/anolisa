@@ -84,9 +84,9 @@ After installation, use the `agent-sec-cli` command:
 
 ```bash
 # System hardening
-agent-sec-cli harden --mode scan
-agent-sec-cli harden --mode reinforce --config agentos_baseline
-agent-sec-cli harden --mode dry-run
+agent-sec-cli harden --scan --config agentos_baseline
+agent-sec-cli harden --reinforce --config agentos_baseline
+agent-sec-cli harden --reinforce --dry-run --config agentos_baseline
 
 # Skill integrity verification
 agent-sec-cli verify
@@ -103,8 +103,8 @@ agent-sec-cli summary --hours 72 --format json
 from agent_sec_cli.security_middleware import invoke
 
 # System hardening
-result = invoke("harden", mode="scan")
-print(result.stdout)
+result = invoke("harden", args=["--scan", "--config", "agentos_baseline"])
+print(result.success)
 
 # Verify a specific skill
 result = invoke("verify", skill="/path/to/skill")
@@ -253,14 +253,14 @@ python -m agent_sec_cli.asset_verify.verifier --skill /path/to/skill
 - **Solution:** Add trusted GPG keys to `asset_verify/trusted-keys/`
 
 **Issue:** `Permission denied` errors during hardening
-- **Solution:** Run with sudo: `sudo agent-sec-cli harden --mode reinforce`
+- **Solution:** Run with sudo: `sudo agent-sec-cli harden --reinforce --config agentos_baseline`
 
 ### Debug Mode
 
 Enable verbose output:
 
 ```bash
-python -m agent_sec_cli.cli harden --mode scan 2>&1 | tee debug.log
+python -m agent_sec_cli.cli harden --scan --config agentos_baseline 2>&1 | tee debug.log
 ```
 
 ---
