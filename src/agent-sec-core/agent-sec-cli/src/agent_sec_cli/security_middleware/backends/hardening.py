@@ -1,15 +1,12 @@
-"""Hardening backend — subprocess wrapper for loongshield SEHarden.
+"""Hardening backend — passthrough wrapper for `loongshield seharden`.
 
-Output format (verified against loongshield source):
-
-    Log lines:  ``[LEVEL HH:MM:SS] source.lua:N: message``
-    Summary:    ``SEHarden Finished. X passed, Y fixed, Z failed, W manual, V dry-run-pending / N total.``
-    Per-rule:   ``[rule_id] STATUS: description``
-
-ANSI colour codes are stripped before parsing.
+The backend preserves the wrapper's legacy defaults and structured event data
+while allowing callers to forward raw seharden arguments directly.
 """
 
+import os
 import re
+import shutil
 import subprocess
 from typing import Any
 
@@ -17,42 +14,28 @@ from agent_sec_cli.security_middleware.backends.base import BaseBackend
 from agent_sec_cli.security_middleware.context import RequestContext
 from agent_sec_cli.security_middleware.result import ActionResult
 
-# ---------------------------------------------------------------------------
-# ANSI escape sequence stripper
-# ---------------------------------------------------------------------------
+DEFAULT_HARDEN_CONFIG = "agentos_baseline"
+_DEFAULT_HARDEN_MODE = "scan"
+_FALLBACK_LOONGSHIELD_PATHS = ("/usr/sbin/loongshield",)
+_MISSING_LOONGSHIELD_ERROR = "loongshield not found. Install it or add it to PATH."
+
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def _strip_ansi(text: str) -> str:
-    """Remove ANSI colour / style escape sequences from *text*."""
-    return _ANSI_RE.sub("", text)
-
-
-# ---------------------------------------------------------------------------
-# Per-rule status patterns  (applied to ANSI-stripped lines)
-#
-# Matches lines like:
-#   [WARN  14:30:01] engine.lua:186: [1.1.3] FAIL: Ensure mounting of udf …
-#   [ERROR 14:30:04] engine.lua:307: [3.2.1] FAILED-TO-FIX: …
-#   [ERROR 14:30:04] engine.lua:295: [6.1.1] ENFORCE-ERROR: …
-#   [INFO  14:30:01] engine.lua:298: [1.1.3] DRY-RUN: would apply …
-#   [INFO  14:30:04] engine.lua:292: [5.1.1] MANUAL: No reinforce steps …
-#   [ERROR …] engine.lua:…: Engine Error: …
-# ---------------------------------------------------------------------------
 _RULE_STATUS_RE = re.compile(
     r"\[(?P<rule_id>[\w.]+)\]\s+"
     r"(?P<status>FAIL|FAILED|FAILED-TO-FIX|ERROR|ENFORCE-ERROR|DRY-RUN|MANUAL|SKIP):\s*"
     r"(?P<message>.+?)\s*$"
 )
-
 _ENGINE_ERROR_RE = re.compile(r"Engine\s+Error:\s*(?P<message>.+?)\s*$")
 
 
-class HardeningBackend(BaseBackend):
-    """Run ``loongshield seharden`` and parse its summary output."""
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI colour and style sequences from process output."""
+    return _ANSI_RE.sub("", text)
 
-    # Summary line — captures all 6 counters.
-    # Example: SEHarden Finished. 42 passed, 0 fixed, 0 failed, 0 manual, 0 dry-run-pending / 42 total.
+
+class HardeningBackend(BaseBackend):
+    """Execute `loongshield seharden` and keep structured hardening results."""
+
     _SUMMARY_RE = re.compile(
         r"SEHarden\s+Finished\.\s*"
         r"(?P<passed>\d+)\s+passed,\s*"
@@ -66,86 +49,210 @@ class HardeningBackend(BaseBackend):
     def execute(
         self,
         ctx: RequestContext,
-        mode: str = "scan",
-        config: str = "agentos_baseline",
+        args: list[str] | tuple[str, ...] | None = None,
         **kwargs: Any,
     ) -> ActionResult:
-        """Execute loongshield seharden in the requested *mode*.
+        """Execute `loongshield seharden` with raw args or legacy kwargs."""
+        raw_args = self._normalize_args(args=args, **kwargs)
+        mode, config = self._describe_request(raw_args)
+        loongshield_path = self._resolve_loongshield_path()
+        cmd = self._build_command(raw_args, loongshield_path=loongshield_path)
+        data = self._build_result_data(
+            raw_args=raw_args,
+            cmd=cmd,
+            tool_path=loongshield_path,
+            mode=mode,
+            config=config,
+        )
 
-        Modes:
-            scan      — ``--scan``
-            reinforce — ``--reinforce``
-            dry-run   — ``--reinforce --dry-run``
-        """
-        cmd = self._build_command(mode, config)
+        if not loongshield_path:
+            return ActionResult(
+                success=False,
+                exit_code=127,
+                error=_MISSING_LOONGSHIELD_ERROR,
+                data=data,
+            )
 
         try:
             proc = subprocess.run(
                 cmd,
+                check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
             )
-        except FileNotFoundError:
+        except OSError as exc:
             return ActionResult(
                 success=False,
-                exit_code=127,
-                error="loongshield: command not found",
+                exit_code=getattr(exc, "errno", 1) or 1,
+                error=f"Failed to execute `loongshield seharden`: {exc}",
+                data=data,
             )
 
-        raw_output = proc.stdout or ""
-        clean_output = _strip_ansi(raw_output)
+        clean_output = _strip_ansi(proc.stdout or "")
+        data["returncode"] = proc.returncode
+        self._parse_output(clean_output, data)
 
-        data: dict = {"mode": mode, "config": config, "failures": [], "fixed_items": []}
+        return ActionResult(
+            success=(proc.returncode == 0),
+            stdout=clean_output,
+            exit_code=proc.returncode,
+            data=data,
+        )
 
-        # --- Parse summary line ---
+    @classmethod
+    def _normalize_args(
+        cls,
+        args: list[str] | tuple[str, ...] | None = None,
+        **kwargs: Any,
+    ) -> list[str]:
+        raw_args = [str(arg) for arg in (args or [])]
+        if raw_args and kwargs:
+            mixed_keys = ", ".join(sorted(kwargs))
+            raise TypeError(
+                f"Do not mix passthrough args with legacy harden kwargs: {mixed_keys}"
+            )
+
+        if raw_args:
+            return raw_args
+
+        legacy_keys = {"mode", "config"}
+        unknown_keys = sorted(set(kwargs) - legacy_keys)
+        if unknown_keys:
+            unknown = ", ".join(unknown_keys)
+            raise TypeError(f"Unsupported harden kwargs: {unknown}")
+
+        if not kwargs:
+            return cls._legacy_args(
+                mode=_DEFAULT_HARDEN_MODE,
+                config=DEFAULT_HARDEN_CONFIG,
+            )
+
+        mode = str(kwargs.get("mode", _DEFAULT_HARDEN_MODE))
+        config = str(kwargs.get("config", DEFAULT_HARDEN_CONFIG))
+        return cls._legacy_args(mode=mode, config=config)
+
+    @staticmethod
+    def _legacy_args(mode: str, config: str) -> list[str]:
+        if mode == "dry-run":
+            return ["--reinforce", "--dry-run", "--config", config]
+        if mode == "reinforce":
+            return ["--reinforce", "--config", config]
+        if mode == "scan":
+            return ["--scan", "--config", config]
+        raise ValueError(
+            f"Invalid harden mode '{mode}'. Choose from: scan, reinforce, dry-run"
+        )
+
+    @staticmethod
+    def _describe_request(args: list[str]) -> tuple[str | None, str | None]:
+        mode: str | None = None
+        config: str | None = None
+        has_scan = "--scan" in args
+        has_reinforce = "--reinforce" in args
+        has_dry_run = "--dry-run" in args
+
+        if has_dry_run:
+            mode = "dry-run"
+        elif has_reinforce:
+            mode = "reinforce"
+        elif has_scan:
+            mode = "scan"
+
+        for index, arg in enumerate(args):
+            if arg == "--config" and index + 1 < len(args):
+                config = args[index + 1]
+            elif arg.startswith("--config="):
+                config = arg.split("=", 1)[1]
+
+        return mode, config
+
+    @staticmethod
+    def _build_command(
+        args: list[str] | tuple[str, ...], loongshield_path: str | None = None
+    ) -> list[str]:
+        return [loongshield_path or "loongshield", "seharden", *args]
+
+    @staticmethod
+    def _build_result_data(
+        raw_args: list[str],
+        cmd: list[str],
+        tool_path: str | None,
+        mode: str | None,
+        config: str | None,
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "argv": cmd,
+            "raw_args": raw_args,
+            "tool_path": tool_path,
+            "failures": [],
+            "fixed_items": [],
+        }
+        if mode is not None:
+            data["mode"] = mode
+        if config is not None:
+            data["config"] = config
+        return data
+
+    @staticmethod
+    def _resolve_loongshield_path() -> str | None:
+        resolved = shutil.which("loongshield")
+        if resolved:
+            return resolved
+
+        for candidate in _FALLBACK_LOONGSHIELD_PATHS:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        return None
+
+    @classmethod
+    def _parse_output(cls, clean_output: str, data: dict[str, Any]) -> None:
         for line in reversed(clean_output.splitlines()):
-            m = self._SUMMARY_RE.search(line)
-            if m:
-                data["passed"] = int(m.group("passed"))
-                data["fixed"] = int(m.group("fixed"))
-                data["failed"] = int(m.group("failed"))
-                data["manual"] = int(m.group("manual"))
-                data["dry_run_pending"] = int(m.group("dry_run_pending"))
-                data["total"] = int(m.group("total"))
+            match = cls._SUMMARY_RE.search(line)
+            if match:
+                data["passed"] = int(match.group("passed"))
+                data["fixed"] = int(match.group("fixed"))
+                data["failed"] = int(match.group("failed"))
+                data["manual"] = int(match.group("manual"))
+                data["dry_run_pending"] = int(match.group("dry_run_pending"))
+                data["total"] = int(match.group("total"))
                 break
 
-        # --- Collect per-rule non-PASS entries ---
-        entries: list[dict] = []
+        entries: list[dict[str, str]] = []
         for line in clean_output.splitlines():
-            m = _RULE_STATUS_RE.search(line)
-            if m:
+            match = _RULE_STATUS_RE.search(line)
+            if match:
                 entries.append(
                     {
-                        "rule_id": m.group("rule_id"),
-                        "status": m.group("status"),
-                        "message": m.group("message").strip(),
+                        "rule_id": match.group("rule_id"),
+                        "status": match.group("status"),
+                        "message": match.group("message").strip(),
                     }
                 )
                 continue
-            m = _ENGINE_ERROR_RE.search(line)
-            if m:
+
+            engine_match = _ENGINE_ERROR_RE.search(line)
+            if engine_match:
                 entries.append(
                     {
                         "rule_id": "",
                         "status": "Engine Error",
-                        "message": m.group("message").strip(),
+                        "message": engine_match.group("message").strip(),
                     }
                 )
 
-        # --- Partition into failures vs fixed_items ---
-        # In reinforce mode, FAIL/FAILED lines are pre-fix detections;
-        # loongshield emits FAILED-TO-FIX / ENFORCE-ERROR for rules it
-        # could *not* fix, so plain FAIL/FAILED entries were remediated.
-        _FIX_DETECTED = frozenset({"FAIL", "FAILED"})
+        mode = data.get("mode")
+        fixed_statuses = frozenset({"FAIL", "FAILED"})
         if mode == "reinforce":
-            data["failures"] = [e for e in entries if e["status"] not in _FIX_DETECTED]
-            data["fixed_items"] = [e for e in entries if e["status"] in _FIX_DETECTED]
+            data["failures"] = [
+                entry for entry in entries if entry["status"] not in fixed_statuses
+            ]
+            data["fixed_items"] = [
+                entry for entry in entries if entry["status"] in fixed_statuses
+            ]
         else:
             data["failures"] = entries
 
-        # Fallback: if summary reports non-pass rules but nothing was captured,
-        # add a warning so the event is never silently incomplete.
         reported_nonpass = (
             data.get("failed", 0)
             + data.get("manual", 0)
@@ -163,23 +270,3 @@ class HardeningBackend(BaseBackend):
                     ),
                 }
             )
-
-        return ActionResult(
-            success=(proc.returncode == 0),
-            stdout=clean_output,
-            exit_code=proc.returncode,
-            data=data,
-        )
-
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _build_command(mode: str, config: str) -> list[str]:
-        cmd = ["loongshield", "seharden"]
-        if mode == "dry-run":
-            cmd += ["--reinforce", "--dry-run"]
-        elif mode == "reinforce":
-            cmd.append("--reinforce")
-        else:
-            cmd.append("--scan")
-        cmd += ["--config", config]
-        return cmd

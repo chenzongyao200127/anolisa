@@ -2,12 +2,56 @@
 
 import typer
 from agent_sec_cli.security_middleware import invoke
+from agent_sec_cli.security_middleware.backends.hardening import (
+    DEFAULT_HARDEN_CONFIG,
+)
 
 app = typer.Typer(
     name="agent-sec-cli",
     help="AgentSecCore unified CLI entry point",
     add_completion=True,
 )
+
+_HARDEN_HELP_TEXT = f"""\
+Usage: agent-sec-cli harden [SEHARDEN_ARGS]...
+
+Defaults:
+  If omitted, the wrapper adds `--scan --config {DEFAULT_HARDEN_CONFIG}`.
+
+Examples:
+  agent-sec-cli harden --scan --config {DEFAULT_HARDEN_CONFIG}
+  agent-sec-cli harden --reinforce --config {DEFAULT_HARDEN_CONFIG}
+  agent-sec-cli harden --reinforce --dry-run --config {DEFAULT_HARDEN_CONFIG}
+
+Common SEHarden flags:
+  --scan              Run compliance scan.
+  --reinforce         Apply remediation actions.
+  --dry-run           Preview reinforce actions without changing the system.
+  --config <ruleset>  Select a profile name or YAML file.
+  --level <level>     Limit execution to a profile level.
+  --verbose           Show detailed rule-level evidence.
+  --log-level <lv>    Set log level: trace|debug|info|warn|error.
+
+Help:
+  agent-sec-cli harden --help             Show this concise wrapper help.
+  agent-sec-cli harden --downstream-help  Show full `loongshield seharden` help.
+"""
+
+
+def _with_default_harden_args(args: list[str]) -> list[str]:
+    """Add wrapper defaults when the caller does not provide them explicitly."""
+    normalized = list(args)
+    if (
+        "--scan" not in normalized
+        and "--reinforce" not in normalized
+        and "--dry-run" not in normalized
+    ):
+        normalized.insert(0, "--scan")
+    if "--config" not in normalized and not any(
+        arg.startswith("--config=") for arg in normalized
+    ):
+        normalized.extend(["--config", DEFAULT_HARDEN_CONFIG])
+    return normalized
 
 
 @app.command(name="log-sandbox", hidden=True)
@@ -51,32 +95,41 @@ def log_sandbox(
     raise typer.Exit(code=result.exit_code)
 
 
-@app.command()
+@app.command(
+    short_help="Scan or reinforce the system against a security baseline.",
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+        "help_option_names": [],
+    },
+)
 def harden(
-    mode: str = typer.Option(
-        "scan",
-        "--mode",
-        help="Hardening mode (default: scan)",
-        case_sensitive=False,
+    ctx: typer.Context,
+    help_flag: bool = typer.Option(
+        False,
+        "--help",
+        "-h",
+        is_eager=True,
+        help="Show concise harden help and examples.",
     ),
-    config: str = typer.Option(
-        "agentos_baseline",
-        "--config",
-        help="Hardening config baseline (default: agentos_baseline)",
+    downstream_help: bool = typer.Option(
+        False,
+        "--downstream-help",
+        help="Show full `loongshield seharden` help and exit.",
     ),
 ):
-    """System security hardening."""
-    # Validate mode choices
-    if mode not in ["scan", "reinforce", "dry-run"]:
-        typer.echo(
-            f"Error: Invalid mode '{mode}'. Choose from: scan, reinforce, dry-run",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    """Scan or reinforce the system against a security baseline."""
+    if help_flag:
+        typer.echo(_HARDEN_HELP_TEXT.rstrip())
+        raise typer.Exit(code=0)
 
-    result = invoke("harden", mode=mode, config=config)
+    if downstream_help:
+        result = invoke("harden", args=["--help"])
+    else:
+        result = invoke("harden", args=_with_default_harden_args(list(ctx.args)))
+
     if result.stdout:
-        typer.echo(result.stdout)
+        typer.echo(result.stdout, nl=False)
     if result.error:
         typer.echo(result.error, err=True)
     raise typer.Exit(code=result.exit_code)

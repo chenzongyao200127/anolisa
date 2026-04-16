@@ -36,7 +36,7 @@ uv sync
 ```bash
 # After installation, use the CLI command
 agent-sec-cli --help
-agent-sec-cli harden --mode scan
+agent-sec-cli harden --scan --config agentos_baseline
 agent-sec-cli verify
 ```
 
@@ -144,7 +144,7 @@ The CLI is now installed as a Python package:
 ```bash
 # Installed command (recommended)
 agent-sec-cli verify
-agent-sec-cli harden --mode scan
+agent-sec-cli harden --scan --config agentos_baseline
 ```
 
 ---

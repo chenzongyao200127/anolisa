@@ -93,7 +93,7 @@ Decision:             [LOCKED]
 
 子 skill: [references/agent-sec-seharden.md](references/agent-sec-seharden.md)
 前置条件: `loongshield` 在 PATH 中
-执行命令: 加载子 skill，传入 `$ARGUMENTS` = `scan`，执行 `agent-sec-cli harden --mode scan`
+执行命令: 加载子 skill，传入 `$ARGUMENTS` = `scan`，执行 `agent-sec-cli harden --scan --config agentos_baseline`
 
 **判定条件：**
 
@@ -176,7 +176,7 @@ FAIL 或 NOT_RUN 时停止，不继续后续 Phase，不进入 Decision。
 执行命令: 重新执行 Phase 1 scan 和 Phase 2 verify 作为复检
 
 ```bash
-sudo agent-sec-cli harden --mode scan
+sudo agent-sec-cli harden --scan --config agentos_baseline
 agent-sec-cli verify
 ```
 
