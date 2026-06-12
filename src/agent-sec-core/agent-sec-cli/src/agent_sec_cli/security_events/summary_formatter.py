@@ -135,16 +135,14 @@ def _get_mode(event: SecurityEvent) -> str:
     result = _get_result(event)
     mode = result.get("mode")
     if mode:
-        return mode
+        return "reinforce" if mode == "dry-run" else mode
     # Fallback: parse request.args for --scan/--reinforce/--dry-run
     args = _get_request(event).get("args", [])
     if isinstance(args, (list, tuple)):
-        if "--dry-run" in args:
-            return "dry-run"
-        if "--reinforce" in args:
-            return "reinforce"
         if "--scan" in args:
             return "scan"
+        if "--dry-run" in args or "--reinforce" in args:
+            return "reinforce"
     return ""
 
 

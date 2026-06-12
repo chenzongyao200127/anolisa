@@ -477,10 +477,14 @@ class TestEventsDefaultOutput:
         # When loongshield is missing, harden may exit 127 without stats
         if "passed" in result_data:
             # If one statistical field exists, all should exist
-            assert (
-                "failed" in result_data
-            ), "Expected 'failed' field when 'passed' exists"
-            assert "total" in result_data, "Expected 'total' field when 'passed' exists"
+            expected_fields = {
+                "fixed",
+                "failed",
+                "manual",
+                "dry_run_pending",
+                "total",
+            }
+            assert expected_fields.issubset(result_data)
             # Validate consistency
             assert isinstance(result_data["passed"], int)
             assert isinstance(result_data["failed"], int)
@@ -510,15 +514,28 @@ class TestEventsDefaultOutput:
         # With loongshield, statistical fields should be present
         result_data = events[0]["details"]["result"]
         assert "passed" in result_data, "Expected 'passed' field with loongshield"
+        assert "fixed" in result_data, "Expected 'fixed' field with loongshield"
         assert "failed" in result_data, "Expected 'failed' field with loongshield"
+        assert "manual" in result_data, "Expected 'manual' field with loongshield"
+        assert "dry_run_pending" in result_data, "Expected 'dry_run_pending' field with loongshield"
         assert "total" in result_data, "Expected 'total' field with loongshield"
 
         # Validate data types and consistency
         assert isinstance(result_data["passed"], int)
+        assert isinstance(result_data["fixed"], int)
         assert isinstance(result_data["failed"], int)
+        assert isinstance(result_data["manual"], int)
+        assert isinstance(result_data["dry_run_pending"], int)
         assert isinstance(result_data["total"], int)
         assert result_data["total"] > 0, "Total rules should be > 0"
-        assert result_data["passed"] + result_data["failed"] == result_data["total"]
+        assert (
+            result_data["passed"]
+            + result_data["fixed"]
+            + result_data["failed"]
+            + result_data["manual"]
+            + result_data["dry_run_pending"]
+            == result_data["total"]
+        )
 
 
 # ---------------------------------------------------------------------------

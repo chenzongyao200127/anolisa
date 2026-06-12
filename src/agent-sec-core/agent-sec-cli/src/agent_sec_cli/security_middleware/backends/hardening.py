@@ -1,12 +1,12 @@
-"""Hardening backend — passthrough wrapper for `loongshield seharden`.
+"""Hardening backend — JSON-contract wrapper for `loongshield seharden`.
 
 The backend preserves the wrapper's legacy defaults and structured event data
-while allowing callers to forward raw seharden arguments directly.
+while forcing the downstream machine-readable JSON contract for hardening runs.
 """
 
+import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 from typing import Any
@@ -29,32 +29,49 @@ _MISSING_LOONGSHIELD_ERROR = (
 )
 logger = logging.getLogger(__name__)
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-_RULE_STATUS_RE = re.compile(
-    r"\[(?P<rule_id>[\w.]+)\]\s+"
-    r"(?P<status>FAIL|FAILED|FAILED-TO-FIX|ERROR|ENFORCE-ERROR|DRY-RUN|MANUAL|SKIP):\s*"
-    r"(?P<message>.+?)\s*$"
+_LOONGSHIELD_JSON_SCHEMA_VERSION = 1
+_PASS_STATUSES = frozenset({"PASS", "FIXED"})
+_VALID_RULE_STATUSES = frozenset(
+    {
+        "PASS",
+        "FAIL",
+        "ERROR",
+        "FIXED",
+        "FAILED-TO-FIX",
+        "ENFORCE-ERROR",
+        "MANUAL",
+        "DRY-RUN",
+    }
 )
-_ENGINE_ERROR_RE = re.compile(r"Engine\s+Error:\s*(?P<message>.+?)\s*$")
-
-
-def _strip_ansi(text: str) -> str:
-    """Remove ANSI colour and style sequences from process output."""
-    return _ANSI_RE.sub("", text)
+_REQUIRED_TOP_LEVEL_FIELDS = frozenset(
+    {
+        "schema_version",
+        "format",
+        "tool",
+        "command",
+        "status",
+        "mode",
+        "profile",
+        "level",
+        "dry_run",
+        "request",
+        "rules",
+        "rule_count",
+        "summary",
+        "manual_review",
+        "manual_review_count",
+        "available_levels",
+        "exit_code",
+        "error",
+    }
+)
+_REQUIRED_REQUEST_FIELDS = frozenset(
+    {"mode", "config", "profile", "level", "requested_level", "dry_run"}
+)
 
 
 class HardeningBackend(BaseBackend):
     """Execute `loongshield seharden` and keep structured hardening results."""
-
-    _SUMMARY_RE = re.compile(
-        r"SEHarden\s+Finished\.\s*"
-        r"(?P<passed>\d+)\s+passed,\s*"
-        r"(?P<fixed>\d+)\s+fixed,\s*"
-        r"(?P<failed>\d+)\s+failed,\s*"
-        r"(?P<manual>\d+)\s+manual,\s*"
-        r"(?P<dry_run_pending>\d+)\s+dry-run-pending\s*/\s*"
-        r"(?P<total>\d+)\s+total\."
-    )
 
     def execute(
         self,
@@ -124,14 +141,24 @@ class HardeningBackend(BaseBackend):
                 data=data,
             )
 
-        clean_output = _strip_ansi(proc.stdout or "")
+        clean_output = proc.stdout or ""
         data["returncode"] = proc.returncode
-        self._parse_output(clean_output, data)
+        parse_error, report = self._parse_json_output(clean_output, data)
+        if parse_error:
+            data["error"] = parse_error
+        exit_code = proc.returncode if proc.returncode != 0 or not parse_error else 1
+        stdout = clean_output if _is_help_request(raw_args) else ""
+        if report is not None:
+            if "--verbose" in raw_args:
+                stdout = _format_json_stdout_verbose(report)
+            else:
+                stdout = _format_json_stdout(report)
 
         return ActionResult(
-            success=(proc.returncode == 0),
-            stdout=clean_output,
-            exit_code=proc.returncode,
+            success=(proc.returncode == 0 and parse_error is None),
+            stdout=stdout,
+            exit_code=exit_code,
+            error=parse_error or "",
             data=data,
         )
 
@@ -144,9 +171,7 @@ class HardeningBackend(BaseBackend):
         raw_args = [str(arg) for arg in (args or [])]
         if raw_args and kwargs:
             mixed_keys = ", ".join(sorted(kwargs))
-            raise TypeError(
-                f"Do not mix passthrough args with legacy harden kwargs: {mixed_keys}"
-            )
+            raise TypeError(f"Do not mix passthrough args with legacy harden kwargs: {mixed_keys}")
 
         if raw_args:
             return raw_args
@@ -175,9 +200,7 @@ class HardeningBackend(BaseBackend):
             return ["--reinforce", "--config", config]
         if mode == "scan":
             return ["--scan", "--config", config]
-        raise ValueError(
-            f"Invalid harden mode '{mode}'. Choose from: scan, reinforce, dry-run"
-        )
+        raise ValueError(f"Invalid harden mode '{mode}'. Choose from: scan, reinforce, dry-run")
 
     @staticmethod
     def _describe_request(args: list[str]) -> tuple[str | None, str | None]:
@@ -187,11 +210,9 @@ class HardeningBackend(BaseBackend):
         has_reinforce = "--reinforce" in args
         has_dry_run = "--dry-run" in args
 
-        if has_dry_run:
-            mode = "dry-run"
-        elif has_reinforce:
+        if has_reinforce or has_dry_run:
             mode = "reinforce"
-        elif has_scan:
+        if has_scan:
             mode = "scan"
 
         for index, arg in enumerate(args):
@@ -206,7 +227,12 @@ class HardeningBackend(BaseBackend):
     def _build_command(
         args: list[str] | tuple[str, ...], loongshield_path: str | None = None
     ) -> list[str]:
-        return [loongshield_path or "loongshield", "seharden", *args]
+        raw_args = list(args)
+        if _is_help_request(raw_args):
+            seharden_args = raw_args
+        else:
+            seharden_args = _ensure_json_format_args(raw_args)
+        return [loongshield_path or "loongshield", "seharden", *seharden_args]
 
     @staticmethod
     def _build_result_data(
@@ -241,67 +267,374 @@ class HardeningBackend(BaseBackend):
         return None
 
     @classmethod
-    def _parse_output(cls, clean_output: str, data: dict[str, Any]) -> None:
-        for line in reversed(clean_output.splitlines()):
-            match = cls._SUMMARY_RE.search(line)
-            if match:
-                data["passed"] = int(match.group("passed"))
-                data["fixed"] = int(match.group("fixed"))
-                data["failed"] = int(match.group("failed"))
-                data["manual"] = int(match.group("manual"))
-                data["dry_run_pending"] = int(match.group("dry_run_pending"))
-                data["total"] = int(match.group("total"))
-                break
+    def _parse_json_output(
+        cls, clean_output: str, data: dict[str, Any]
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        if _is_help_request(data["raw_args"]):
+            return None, None
 
-        entries: list[dict[str, str]] = []
-        for line in clean_output.splitlines():
-            match = _RULE_STATUS_RE.search(line)
-            if match:
-                entries.append(
-                    {
-                        "rule_id": match.group("rule_id"),
-                        "status": match.group("status"),
-                        "message": match.group("message").strip(),
-                    }
-                )
-                continue
+        try:
+            report = json.loads(clean_output)
+        except json.JSONDecodeError as exc:
+            return f"loongshield seharden did not return valid JSON: {exc.msg}", None
 
-            engine_match = _ENGINE_ERROR_RE.search(line)
-            if engine_match:
-                entries.append(
-                    {
-                        "rule_id": "",
-                        "status": "Engine Error",
-                        "message": engine_match.group("message").strip(),
-                    }
-                )
+        contract_error = cls._validate_json_contract(report)
+        if contract_error:
+            return contract_error, None
 
-        mode = data.get("mode")
-        fixed_statuses = frozenset({"FAIL", "FAILED"})
-        if mode == "reinforce":
-            data["failures"] = [
-                entry for entry in entries if entry["status"] not in fixed_statuses
-            ]
-            data["fixed_items"] = [
-                entry for entry in entries if entry["status"] in fixed_statuses
-            ]
-        else:
-            data["failures"] = entries
+        summary = report["summary"]
+        rules = report["rules"]
+        data["loongshield_schema_version"] = report["schema_version"]
+        data["loongshield_status"] = report.get("status")
+        data["summary"] = summary
+        data["mode"] = report.get("mode")
+        data["dry_run"] = report.get("dry_run")
+        data["config"] = (report.get("request") or {}).get("config")
+        data["passed"] = _as_int(summary.get("passed"))
+        data["fixed"] = _as_int(summary.get("fixed"))
+        data["failed"] = _as_int(summary.get("failed"))
+        data["manual"] = _as_int(summary.get("manual"))
+        data["dry_run_pending"] = _as_int(summary.get("dry_run_pending"))
+        data["total"] = _as_int(summary.get("total"), _as_int(report.get("rule_count")))
+        data["failures"] = [
+            _rule_entry(rule)
+            for rule in rules
+            if str(rule.get("status", "UNKNOWN")) not in _PASS_STATUSES
+        ]
+        data["fixed_items"] = [
+            _rule_entry(rule) for rule in rules if str(rule.get("status")) == "FIXED"
+        ]
+        data["manual_review"] = report["manual_review"]
+        data["manual_review_count"] = report["manual_review_count"]
+        data["available_levels"] = report["available_levels"]
 
-        reported_nonpass = (
-            data.get("failed", 0)
-            + data.get("manual", 0)
-            + data.get("fixed", 0)
-            + data.get("dry_run_pending", 0)
-        )
-        if reported_nonpass > 0 and not data["failures"] and not data["fixed_items"]:
+        if report.get("error"):
+            data["error"] = report["error"]
+
+        reported_nonpass = data["failed"] + data["manual"] + data["dry_run_pending"]
+        if reported_nonpass > 0 and not data["failures"]:
             data["failures"].append(
                 {
                     "rule_id": "",
                     "status": "UNKNOWN",
                     "message": (
-                        f"Summary reports {reported_nonpass} non-pass rule(s) "
-                        "but per-rule details could not be parsed from output."
+                        f"JSON summary reports {reported_nonpass} non-pass rule(s) "
+                        "but the rules array contains no matching details."
                     ),
                 }
             )
+        return None, report
+
+    @staticmethod
+    def _validate_json_contract(report: Any) -> str | None:
+        if not isinstance(report, dict):
+            return "loongshield seharden JSON contract violation: top-level value is not an object"
+        missing_fields = _REQUIRED_TOP_LEVEL_FIELDS - report.keys()
+        if missing_fields:
+            return (
+                "loongshield seharden JSON contract violation: "
+                f"missing top-level field {sorted(missing_fields)[0]!r}"
+            )
+        expected = {
+            "schema_version": _LOONGSHIELD_JSON_SCHEMA_VERSION,
+            "format": "json",
+            "tool": "loongshield",
+            "command": "seharden",
+        }
+        for key, value in expected.items():
+            if report.get(key) != value:
+                return (
+                    "loongshield seharden JSON contract violation: "
+                    f"expected {key}={value!r}, got {report.get(key)!r}"
+                )
+        if not isinstance(report.get("request"), dict):
+            return "loongshield seharden JSON contract violation: request is not an object"
+        missing_request_fields = _REQUIRED_REQUEST_FIELDS - report["request"].keys()
+        if missing_request_fields:
+            return (
+                "loongshield seharden JSON contract violation: "
+                f"missing request field {sorted(missing_request_fields)[0]!r}"
+            )
+        if not isinstance(report.get("summary"), dict):
+            return "loongshield seharden JSON contract violation: summary is not an object"
+        scalar_error = _validate_scalar_fields(report)
+        if scalar_error:
+            return scalar_error
+        if not isinstance(report.get("rules"), list):
+            return "loongshield seharden JSON contract violation: rules is not an array"
+        rule_error = _validate_rules(report["rules"])
+        if rule_error:
+            return rule_error
+        if not isinstance(report.get("manual_review"), list):
+            return "loongshield seharden JSON contract violation: manual_review is not an array"
+        if len(report["rules"]) != report["rule_count"]:
+            return (
+                "loongshield seharden JSON contract violation: "
+                "rule_count does not match rules length"
+            )
+        if len(report["manual_review"]) != report["manual_review_count"]:
+            return (
+                "loongshield seharden JSON contract violation: "
+                "manual_review_count does not match manual_review length"
+            )
+        summary_error = _validate_summary(report["summary"], report["rule_count"])
+        if summary_error:
+            return summary_error
+        status_count_error = _validate_summary_matches_rules(
+            report["summary"], report["rules"]
+        )
+        if status_count_error:
+            return status_count_error
+        return None
+
+
+def _is_help_request(args: list[str]) -> bool:
+    return "--help" in args or "-h" in args
+
+
+def _validate_scalar_fields(report: dict[str, Any]) -> str | None:
+    expected_strings = {
+        "status": {"passed", "failed"},
+        "mode": {"scan", "reinforce"},
+    }
+    for key, allowed_values in expected_strings.items():
+        value = report.get(key)
+        if not isinstance(value, str) or value not in allowed_values:
+            return (
+                "loongshield seharden JSON contract violation: "
+                f"{key} must be one of {sorted(allowed_values)!r}"
+            )
+
+    if not isinstance(report.get("dry_run"), bool):
+        return "loongshield seharden JSON contract violation: dry_run is not a boolean"
+
+    for key in ("rule_count", "manual_review_count", "exit_code"):
+        if type(report.get(key)) is not int:
+            return (
+                "loongshield seharden JSON contract violation: "
+                f"{key} is not an integer"
+            )
+
+    if report["status"] != ("passed" if report["exit_code"] == 0 else "failed"):
+        return (
+            "loongshield seharden JSON contract violation: "
+            "status does not match exit_code"
+        )
+
+    if report["request"].get("mode") != report["mode"]:
+        return (
+            "loongshield seharden JSON contract violation: "
+            "request.mode does not match mode"
+        )
+    if report["request"].get("dry_run") is not report["dry_run"]:
+        return (
+            "loongshield seharden JSON contract violation: "
+            "request.dry_run does not match dry_run"
+        )
+    if not isinstance(report.get("level"), str) or report["level"] == "":
+        return "loongshield seharden JSON contract violation: level must be a non-empty string"
+    if not isinstance(report["request"].get("level"), str) or report["request"]["level"] == "":
+        return (
+            "loongshield seharden JSON contract violation: "
+            "request.level must be a non-empty string"
+        )
+    for key in ("profile", "error"):
+        value = report.get(key)
+        if value is not None and not isinstance(value, str):
+            return (
+                "loongshield seharden JSON contract violation: "
+                f"{key} must be a string or null"
+            )
+    for key in ("config", "profile", "requested_level"):
+        value = report["request"].get(key)
+        if value is not None and not isinstance(value, str):
+            return (
+                "loongshield seharden JSON contract violation: "
+                f"request.{key} must be a string or null"
+            )
+
+    available_levels = report.get("available_levels")
+    if available_levels is not None and not (
+        isinstance(available_levels, list)
+        and all(isinstance(item, str) for item in available_levels)
+    ):
+        return (
+            "loongshield seharden JSON contract violation: "
+            "available_levels must be an array of strings or null"
+        )
+    return None
+
+
+def _validate_summary(summary: dict[str, Any], rule_count: int) -> str | None:
+    summary_keys = ("passed", "fixed", "failed", "manual", "dry_run_pending", "total")
+    for key in summary_keys:
+        value = summary.get(key)
+        if type(value) is not int:
+            return (
+                "loongshield seharden JSON contract violation: "
+                f"summary.{key} is not an integer"
+            )
+    if summary["total"] != rule_count:
+        return (
+            "loongshield seharden JSON contract violation: "
+            "summary.total does not match rule_count"
+        )
+    counted = (
+        summary["passed"]
+        + summary["fixed"]
+        + summary["failed"]
+        + summary["manual"]
+        + summary["dry_run_pending"]
+    )
+    if counted != summary["total"]:
+        return (
+            "loongshield seharden JSON contract violation: "
+            "summary counts do not add up to summary.total"
+        )
+    return None
+
+
+def _validate_summary_matches_rules(
+    summary: dict[str, Any], rules: list[dict[str, Any]]
+) -> str | None:
+    counts = {
+        "passed": 0,
+        "fixed": 0,
+        "failed": 0,
+        "manual": 0,
+        "dry_run_pending": 0,
+    }
+    for rule in rules:
+        status = rule["status"]
+        if status == "PASS":
+            counts["passed"] += 1
+        elif status == "FIXED":
+            counts["fixed"] += 1
+        elif status == "MANUAL":
+            counts["manual"] += 1
+        elif status == "DRY-RUN":
+            counts["dry_run_pending"] += 1
+        else:
+            counts["failed"] += 1
+
+    for key, value in counts.items():
+        if summary[key] != value:
+            return (
+                "loongshield seharden JSON contract violation: "
+                f"summary.{key} does not match rules statuses"
+            )
+    return None
+
+
+def _validate_rules(rules: list[Any]) -> str | None:
+    required_strings = ("id", "desc", "status")
+    for index, rule in enumerate(rules, start=1):
+        if not isinstance(rule, dict):
+            return "loongshield seharden JSON contract violation: rules contains a non-object item"
+        for key in required_strings:
+            value = rule.get(key)
+            if not isinstance(value, str) or value == "":
+                return (
+                    "loongshield seharden JSON contract violation: "
+                    f"rules[{index}].{key} must be a non-empty string"
+                )
+        if rule["status"] not in _VALID_RULE_STATUSES:
+            return (
+                "loongshield seharden JSON contract violation: "
+                f"rules[{index}].status is not a known v1 status"
+            )
+        reason = rule.get("reason")
+        if reason is not None and not isinstance(reason, str):
+            return (
+                "loongshield seharden JSON contract violation: "
+                f"rules[{index}].reason must be a string or null"
+            )
+    return None
+
+
+def _ensure_json_format_args(args: list[str]) -> list[str]:
+    normalized: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--format":
+            if index + 1 < len(args) and args[index + 1] in {"text", "json"}:
+                index += 2
+                continue
+            return list(args)
+        if arg.startswith("--format="):
+            if arg.split("=", 1)[1] in {"text", "json"}:
+                index += 1
+                continue
+            return list(args)
+        normalized.append(arg)
+        index += 1
+    normalized.extend(["--format", "json"])
+    return normalized
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _rule_entry(rule: dict[str, Any]) -> dict[str, str]:
+    return {
+        "rule_id": str(rule.get("id") or ""),
+        "status": str(rule.get("status") or "UNKNOWN"),
+        "message": str(rule.get("reason") or rule.get("desc") or ""),
+    }
+
+
+def _format_json_stdout(report: dict[str, Any]) -> str:
+    summary = report.get("summary") or {}
+    profile = report.get("profile") or (report.get("request") or {}).get("config")
+    mode = report.get("mode") or "scan"
+    mode_label = f"{mode} (dry-run)" if report.get("dry_run") else mode
+    level = report.get("level") or "all"
+    total = _as_int(summary.get("total"), _as_int(report.get("rule_count")))
+    lines = [
+        f"SEHarden {mode_label}: profile='{profile}', level='{level}', {total} rule(s)",
+        (
+            "SEHarden Finished. "
+            f"{_as_int(summary.get('passed'))} passed, "
+            f"{_as_int(summary.get('fixed'))} fixed, "
+            f"{_as_int(summary.get('failed'))} failed, "
+            f"{_as_int(summary.get('manual'))} manual, "
+            f"{_as_int(summary.get('dry_run_pending'))} dry-run-pending / "
+            f"{total} total."
+        ),
+    ]
+    if report.get("error"):
+        lines.append(f"Error: {report['error']}")
+    return "\n".join(lines) + "\n"
+
+
+def _format_json_stdout_verbose(report: dict[str, Any]) -> str:
+    lines = [_format_json_stdout(report).rstrip()]
+    rules = report.get("rules") or []
+    if rules:
+        lines.append("")
+        lines.append("Rules:")
+        for rule in rules:
+            reason = rule.get("reason")
+            desc = rule.get("desc") or ""
+            lines.append(f"  {rule.get('status')} [{rule.get('id')}] {desc}")
+            if reason:
+                lines.append(f"    reason: {reason}")
+
+    manual_review = report.get("manual_review") or []
+    if manual_review:
+        lines.append("")
+        lines.append(f"Manual Review Summary: {len(manual_review)} item(s)")
+        for item in manual_review:
+            area = item.get("area", "")
+            text = item.get("item", "")
+            reason = item.get("reason")
+            lines.append(f"  - [{area}] {text}")
+            if reason:
+                lines.append(f"    reason: {reason}")
+
+    return "\n".join(lines) + "\n"

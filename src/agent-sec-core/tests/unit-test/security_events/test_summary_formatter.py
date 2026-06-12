@@ -222,6 +222,100 @@ class TestHardeningSummary:
         output = format_summary(events, "last 24 hours")
         assert "Reinforcements:   1 (succeeded: 1, failed: 0)" in output
 
+    def test_dry_run_is_counted_as_reinforcement(self):
+        events = [
+            _make_event(
+                event_type="harden",
+                category="hardening",
+                result="failed",
+                details={
+                    "request": {
+                        "args": [
+                            "--reinforce",
+                            "--dry-run",
+                            "--config",
+                            "agentos_baseline",
+                        ]
+                    },
+                    "result": {
+                        "mode": "reinforce",
+                        "dry_run": True,
+                        "config": "agentos_baseline",
+                        "passed": 0,
+                        "failed": 0,
+                        "total": 1,
+                        "failures": [
+                            {
+                                "rule_id": "SEC-001",
+                                "status": "DRY-RUN",
+                                "message": "would apply 1 action(s)",
+                            }
+                        ],
+                        "fixed": 0,
+                        "manual": 0,
+                        "dry_run_pending": 1,
+                        "fixed_items": [],
+                    },
+                },
+                timestamp=_ts_minutes_ago(5),
+            ),
+            _make_event(
+                event_type="harden",
+                category="hardening",
+                result="failed",
+                details={
+                    "request": {"args": ["--dry-run", "--config", "agentos_baseline"]},
+                    "result": {
+                        "config": "agentos_baseline",
+                        "passed": 0,
+                        "failed": 0,
+                        "total": 1,
+                        "failures": [],
+                        "fixed": 0,
+                        "manual": 0,
+                        "dry_run_pending": 1,
+                        "fixed_items": [],
+                    },
+                },
+                timestamp=_ts_minutes_ago(10),
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Reinforcements:   2 (succeeded: 0, failed: 2)" in output
+
+    def test_scan_dry_run_fallback_stays_scan(self):
+        events = [
+            _make_event(
+                event_type="harden",
+                category="hardening",
+                result="succeeded",
+                details={
+                    "request": {
+                        "args": [
+                            "--scan",
+                            "--dry-run",
+                            "--config",
+                            "agentos_baseline",
+                        ]
+                    },
+                    "result": {
+                        "config": "agentos_baseline",
+                        "passed": 1,
+                        "failed": 0,
+                        "total": 1,
+                        "failures": [],
+                        "fixed": 0,
+                        "manual": 0,
+                        "dry_run_pending": 0,
+                        "fixed_items": [],
+                    },
+                },
+                timestamp=_ts_minutes_ago(5),
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Scans performed:  1 (succeeded: 1, failed: 0)" in output
+
     def test_failed_scan(self):
         events = [
             _make_event(
